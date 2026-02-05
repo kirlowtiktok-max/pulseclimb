@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEON CLIMB : L'ASCENSION</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tmi.js@1.8.5/dist/tmi.min.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@19.2.4",
+        "react-dom/client": "https://esm.sh/react-dom@19.2.4/client"
+      }
+    }
+    </script>
+    <style>
+        body { margin: 0; padding: 0; background-color: #FDFDFD; }
+        canvas { display: block; max-width: 100%; height: auto; }
+        @keyframes shimmer { 0% { left: -100%; } 100% { left: 100%; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useRef, useEffect, useState, useCallback } from 'react';
+        import { createRoot } from 'react-dom/client';
+
+        // --- CONSTANTES DU JEU ---
+        const CANVAS_WIDTH = 600;
+        const CANVAS_HEIGHT = 800;
+        const GRAVITY_BASE = 0.4;
+        const JUMP_FORCE = -14;
+        const SPEED = 0.7;
+        const MAX_SPEED = 6;
+        const FRICTION = 0.85;
+        const COMMAND_COOLDOWN = 10000;
+        const PIXELS_PER_METER = 64;
+
+        // --- COMPOSANT JEU (GameCanvas) ---
+        const GameCanvas = ({ streamerMode, twitchChannel, setScreen }) => {
+            const canvasRef = useRef(null);
+            const [altitude, setAltitude] = useState(0);
+            const [twitchConnected, setTwitchConnected] = useState(false);
+            const lastCommandTime = useRef(0);
+            const gravityMultiplier = useRef(1);
+
+            const player = useRef({
+                position: { x: CANVAS_WIDTH / 2 - 15, y: CANVAS_HEIGHT - 120 },
+                velocity: { x: 0, y: 0 },
+                size: { width: 32, height: 32 },
+                color: '#FF0080',
+                onGround: false
+            });
+
+            const platforms = useRef([]);
+            const cameraY = useRef(0);
+            const targetCameraY = useRef(0);
+            const highestY = useRef(CANVAS_HEIGHT);
+            const maxAltitudeReached = useRef(0);
+            const keys = useRef({});
+
+            const spawnPlatform = () => {
+                const width = 100 + Math.random() * 80;
+                const distY = 130 + Math.random() * 50;
+                const posX = Math.random() * (CANVAS_WIDTH - width);
+                const newY = highestY.current - distY;
+                platforms.current.push({
+                    position: { x: posX, y: newY },
+                    size: { width, height: 16 },
+                    color: Math.random() > 0.5 ? 'rgba(255, 140, 0, 0.6)' : 'rgba(0, 210, 255, 0.6)',
+                    isGround: false
+                });
+                highestY.current = newY;
+            };
+
+            const resetGame = () => {
+                player.current.position = { x: CANVAS_WIDTH / 2 - 16, y: CANVAS_HEIGHT - 120 };
+                player.current.velocity = { x: 0, y: 0 };
+                cameraY.current = 0;
+                targetCameraY.current = 0;
+                highestY.current = CANVAS_HEIGHT;
+                maxAltitudeReached.current = 0;
+                gravityMultiplier.current = 1;
+                platforms.current = [{
+                    position: { x: 0, y: CANVAS_HEIGHT - 40 },
+                    size: { width: CANVAS_WIDTH, height: 40 },
+                    color: '#FFFFFF',
+                    isGround: true
+                }];
+                for(let i=0; i<10; i++) spawnPlatform();
+                setAltitude(0);
+            };
+
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                resetGame();
+
+                let client;
+                if (streamerMode && twitchChannel && window.tmi) {
+                    client = new window.tmi.Client({ channels: [twitchChannel] });
+                    client.connect().then(() => setTwitchConnected(true)).catch(console.error);
+                    client.on('message', (chan, tags, msg) => {
+                        const now = Date.now();
+                        if (now - lastCommandTime.current < COMMAND_COOLDOWN) return;
+                        const cmd = msg.toLowerCase().trim();
+                        if (cmd === '!boom') { player.current.velocity.y = -22; lastCommandTime.current = now; }
+                        else if (cmd === '!poids') { 
+                            gravityMultiplier.current = 3; lastCommandTime.current = now;
+                            setTimeout(() => gravityMultiplier.current = 1, 5000);
+                        }
+                    });
+                }
+
+                const handleKey = (e) => { keys.current[e.code] = e.type === 'keydown'; };
+                window.addEventListener('keydown', handleKey);
+                window.addEventListener('keyup', handleKey);
+
+                let animId;
+                const loop = () => {
+                    const p = player.current;
+                    if (keys.current['ArrowLeft']) p.velocity.x -= SPEED;
+                    if (keys.current['ArrowRight']) p.velocity.x += SPEED;
+                    p.velocity.y += (GRAVITY_BASE * gravityMultiplier.current);
+                    p.velocity.x *= FRICTION;
+                    p.position.x += p.velocity.x;
+                    p.position.y += p.velocity.y;
+
+                    if (p.position.x + p.size.width < 0) p.position.x = CANVAS_WIDTH;
+                    if (p.position.x > CANVAS_WIDTH) p.position.x = -p.size.width;
+
+                    p.onGround = false;
+                    platforms.current.forEach(plat => {
+                        if (p.velocity.y > 0 && 
+                            p.position.x < plat.position.x + plat.size.width &&
+                            p.position.x + p.size.width > plat.position.x &&
+                            p.position.y + p.size.height >= plat.position.y &&
+                            p.position.y + p.size.height - p.velocity.y <= plat.position.y + 12) {
+                            p.position.y = plat.position.y - p.size.height;
+                            p.velocity.y = 0;
+                            p.onGround = true;
+                        }
+                    });
+
+                    if (keys.current['Space'] && p.onGround) p.velocity.y = JUMP_FORCE;
+
+                    targetCameraY.current = Math.min(targetCameraY.current, p.position.y - CANVAS_HEIGHT/2);
+                    cameraY.current += (targetCameraY.current - cameraY.current) * 0.1;
+
+                    const currentMeters = Math.floor((CANVAS_HEIGHT - 120 - p.position.y) / PIXELS_PER_METER);
+                    if (currentMeters > maxAltitudeReached.current) {
+                        maxAltitudeReached.current = currentMeters;
+                        setAltitude(currentMeters);
+                    }
+
+                    if (highestY.current > cameraY.current - CANVAS_HEIGHT) spawnPlatform();
+                    if (p.position.y > cameraY.current + CANVAS_HEIGHT + 150) setScreen('MENU');
+
+                    ctx.fillStyle = '#FDFDFD';
+                    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                    ctx.save();
+                    ctx.translate(0, -cameraY.current);
+
+                    platforms.current.forEach(plat => {
+                        ctx.fillStyle = plat.isGround ? '#EEE' : plat.color;
+                        ctx.beginPath();
+                        ctx.roundRect(plat.position.x, plat.position.y, plat.size.width, plat.size.height, 8);
+                        ctx.fill();
+                    });
+
+                    ctx.fillStyle = gravityMultiplier.current > 1 ? '#333' : '#FF0080';
+                    ctx.beginPath();
+                    ctx.arc(p.position.x + 16, p.position.y + 16, 16, 0, Math.PI*2);
+                    ctx.fill();
+                    ctx.restore();
+
+                    animId = requestAnimationFrame(loop);
+                };
+                loop();
+
+                return () => {
+                    window.removeEventListener('keydown', handleKey);
+                    window.removeEventListener('keyup', handleKey);
+                    cancelAnimationFrame(animId);
+                    if(client) client.disconnect();
+                };
+            }, [streamerMode, twitchChannel]);
+
+            return (
+                <div className="relative bg-white/40 backdrop-blur-2xl rounded-[56px] overflow-hidden shadow-2xl w-[600px] h-[800px]">
+                    <div className="absolute top-8 inset-x-8 z-10 flex justify-between pointer-events-none">
+                        <div className="bg-white/80 px-6 py-2 rounded-full shadow-md font-black text-xl">{altitude}m</div>
+                        {streamerMode && (
+                            <div className={`px-4 py-1 rounded-full text-[10px] font-bold border ${twitchConnected ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+                                {twitchConnected ? `LIVE: ${twitchChannel}` : 'CONNECTING...'}
+                            </div>
+                        )}
+                    </div>
+                    <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} />
+                </div>
+            );
+        };
+
+        // --- COMPOSANT PRINCIPAL (App) ---
+        const App = () => {
+            const [screen, setScreen] = useState('MENU');
+            const [streamerMode, setStreamerMode] = useState(false);
+            const [twitchChannel, setTwitchChannel] = useState('');
+
+            return (
+                <div className="fixed inset-0 bg-[#FDFDFD] flex flex-col items-center justify-center p-4 overflow-hidden">
+                    {/* Background décoratif */}
+                    <div className="absolute inset-0 pointer-events-none">
+                        <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-orange-100 rounded-full blur-[120px] opacity-40 animate-pulse" />
+                        <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-blue-100 rounded-full blur-[120px] opacity-40" />
+                    </div>
+
+                    {screen === 'GAME' ? (
+                        <GameCanvas streamerMode={streamerMode} twitchChannel={twitchChannel} setScreen={setScreen} />
+                    ) : (
+                        <div className="z-20 flex flex-col items-center max-w-sm w-full text-center">
+                            <h1 className="text-6xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-orange-500 to-pink-600 mb-12">NEON CLIMB</h1>
+                            
+                            <div className="flex flex-col gap-4 w-full">
+                                <button onClick={() => setStreamerMode(!streamerMode)} className={`h-14 rounded-2xl border-2 font-bold text-[10px] tracking-widest transition-all ${streamerMode ? 'bg-cyan-50 border-cyan-400 text-cyan-600 shadow-lg' : 'bg-white border-gray-100 text-gray-400'}`}>
+                                    MODE STREAMER : {streamerMode ? 'ON' : 'OFF'}
+                                </button>
+
+                                {streamerMode && (
+                                    <input type="text" placeholder="NOM DU CHANNEL TWITCH" value={twitchChannel} onChange={(e)=>setTwitchChannel(e.target.value)} className="h-14 bg-white rounded-2xl border border-gray-200 px-4 text-center text-sm font-bold focus:ring-2 focus:ring-cyan-400 outline-none" />
+                                )}
+
+                                <button onClick={() => (streamerMode && !twitchChannel) ? alert("Twitch channel requis") : setScreen('GAME')} className="h-16 rounded-3xl bg-gradient-to-br from-orange-400 to-pink-500 text-white font-black tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-transform">
+                                    LANCER L'ASCENSION
+                                </button>
+                            </div>
+                            <p className="mt-8 text-[10px] text-gray-300 font-bold tracking-[0.3em]">!BOOM • !POIDS</p>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
