@@ -1,34 +1,81 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NEON CLIMB : L'ASCENSION</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PULSE CLIMB : L'ASCENSION</title>
+    
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/tmi.js@1.8.5/dist/tmi.min.js"></script>
-    <script type="importmap">
-    {
-      "imports": {
-        "react": "https://esm.sh/react@19.2.4",
-        "react-dom/client": "https://esm.sh/react-dom@19.2.4/client"
-      }
-    }
-    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/tmi.js@1.8.5/static/tmi.min.js"></script>
+    
     <style>
-        body { margin: 0; padding: 0; background-color: #FDFDFD; }
-        canvas { display: block; max-width: 100%; height: auto; }
-        @keyframes shimmer { 0% { left: -100%; } 100% { left: 100%; } }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: #FDFDFD;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%) skewX(-15deg); }
+            100% { transform: translateX(200%) skewX(-15deg); }
+        }
+
+        /* Styles pour les animations d'entrée */
+        .animate-in {
+            animation: fadeIn 0.7s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
-    <script type="text/babel" data-type="module">
-        import React, { useRef, useEffect, useState, useCallback } from 'react';
-        import { createRoot } from 'react-dom/client';
+    <script type="text/babel" data-presets="typescript,react">
+        const { useRef, useEffect, useState, useCallback } = React;
 
-        // --- CONSTANTES DU JEU ---
+        // --- TYPES & INTERFACES ---
+        interface Position { x: number; y: number; }
+        interface Size { width: number; height: number; }
+        interface Player {
+            position: Position;
+            velocity: Position;
+            size: Size;
+            color: string;
+            onGround: boolean;
+            canJump: boolean;
+        }
+        interface Platform {
+            position: Position;
+            size: Size;
+            color: string;
+            isGround?: boolean;
+            isHazard?: boolean;
+        }
+        interface Particle {
+            x: number; y: number; vx: number; vy: number;
+            life: number; maxLife: number; color: string; size: number; gravity: number;
+        }
+        interface Bomb { x: number; y: number; vy: number; radius: number; }
+        interface GameSnapshot {
+            platforms: Platform[];
+            playerPos: Position;
+            cameraY: number;
+            targetCameraY: number;
+            highestY: number;
+            altitude: number;
+        }
+
+        // --- CONSTANTES ---
         const CANVAS_WIDTH = 600;
         const CANVAS_HEIGHT = 800;
         const GRAVITY_BASE = 0.4;
@@ -36,47 +83,114 @@
         const SPEED = 0.7;
         const MAX_SPEED = 6;
         const FRICTION = 0.85;
-        const COMMAND_COOLDOWN = 10000;
+        const COMMAND_COOLDOWN = 45000;
         const PIXELS_PER_METER = 64;
 
-        // --- COMPOSANT JEU (GameCanvas) ---
-        const GameCanvas = ({ streamerMode, twitchChannel, setScreen }) => {
+        const DEFAULT_BG_MUSIC_URL = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3";
+        const JUMP_SFX_URL = "https://assets.mixkit.co/active_storage/sfx/2571/2571-preview.mp3";
+        const DEATH_SFX_URL = "https://assets.mixkit.co/active_storage/sfx/1155/1155-preview.mp3";
+        const ALARM_SFX_URL = "https://assets.mixkit.co/active_storage/sfx/951/951-preview.mp3";
+
+        // --- COMPOSANT JEU ---
+        const GameCanvas = () => {
             const canvasRef = useRef(null);
+            const fileInputRef = useRef(null);
+            const [screen, setScreen] = useState('MENU');
             const [altitude, setAltitude] = useState(0);
+            const [isMuted, setIsMuted] = useState(false);
+            const [customMusicName, setCustomMusicName] = useState(null);
+            
+            const [isEventActive, setIsEventActive] = useState(false);
+            const [eventTimeLeft, setEventTimeLeft] = useState(0);
+            const [flashMessage, setFlashMessage] = useState(null);
+            const bombsRef = useRef([]);
+            const snapshotRef = useRef(null);
+
+            const [streamerMode, setStreamerMode] = useState(false);
+            const [twitchChannel, setTwitchChannel] = useState('');
             const [twitchConnected, setTwitchConnected] = useState(false);
+            
             const lastCommandTime = useRef(0);
             const gravityMultiplier = useRef(1);
+            const lastPlatformWasHazard = useRef(false);
+            const lastPlatformX = useRef(CANVAS_WIDTH / 2);
+
+            const audioBg = useRef(null);
+            const audioJump = useRef(null);
+            const audioDeath = useRef(null);
+            const audioAlarm = useRef(null);
 
             const player = useRef({
                 position: { x: CANVAS_WIDTH / 2 - 15, y: CANVAS_HEIGHT - 120 },
                 velocity: { x: 0, y: 0 },
                 size: { width: 32, height: 32 },
                 color: '#FF0080',
-                onGround: false
+                onGround: false,
+                canJump: true
             });
 
             const platforms = useRef([]);
+            const particles = useRef([]);
             const cameraY = useRef(0);
             const targetCameraY = useRef(0);
             const highestY = useRef(CANVAS_HEIGHT);
             const maxAltitudeReached = useRef(0);
             const keys = useRef({});
 
+            useEffect(() => {
+                audioBg.current = new Audio(DEFAULT_BG_MUSIC_URL);
+                audioBg.current.loop = true;
+                audioBg.current.volume = 0.3;
+                audioJump.current = new Audio(JUMP_SFX_URL);
+                audioDeath.current = new Audio(DEATH_SFX_URL);
+                audioAlarm.current = new Audio(ALARM_SFX_URL);
+            }, []);
+
+            useEffect(() => {
+                const audios = [audioBg.current, audioJump.current, audioDeath.current, audioAlarm.current];
+                audios.forEach(a => { if(a) a.muted = isMuted; });
+            }, [isMuted]);
+
+            const triggerExplosion = (x, y) => {
+                const colors = ['#FF0080', '#FFFFFF', '#FFD700', '#FF8C00'];
+                for (let i = 0; i < 70; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const speed = 2 + Math.random() * 14;
+                    particles.current.push({
+                        x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+                        life: 0, maxLife: 40 + Math.random() * 60,
+                        color: colors[Math.floor(Math.random() * colors.length)],
+                        size: 2 + Math.random() * 8, gravity: 0.15
+                    });
+                }
+            };
+
             const spawnPlatform = () => {
                 const width = 100 + Math.random() * 80;
-                const distY = 130 + Math.random() * 50;
-                const posX = Math.random() * (CANVAS_WIDTH - width);
+                let distY = 90 + Math.random() * 40; 
+                if (lastPlatformWasHazard.current) distY += 30;
+                const posX = Math.max(0, Math.min(CANVAS_WIDTH - width, lastPlatformX.current - 200 + Math.random() * 400));
                 const newY = highestY.current - distY;
+                const currentAlt = Math.floor((CANVAS_HEIGHT - 120 - newY) / PIXELS_PER_METER);
+                let isHazard = !lastPlatformWasHazard.current && currentAlt > 25 && width > 120 && Math.random() < 0.18;
+
                 platforms.current.push({
                     position: { x: posX, y: newY },
                     size: { width, height: 16 },
-                    color: Math.random() > 0.5 ? 'rgba(255, 140, 0, 0.6)' : 'rgba(0, 210, 255, 0.6)',
-                    isGround: false
+                    color: isHazard ? '#FF3030' : (Math.random() > 0.5 ? 'rgba(255, 140, 0, 0.6)' : 'rgba(0, 210, 255, 0.6)'),
+                    isHazard
                 });
+                lastPlatformWasHazard.current = isHazard;
+                lastPlatformX.current = posX + width / 2;
                 highestY.current = newY;
             };
 
             const resetGame = () => {
+                audioBg.current?.play().catch(() => {});
+                setIsEventActive(false);
+                setEventTimeLeft(0);
+                setFlashMessage(null);
+                bombsRef.current = [];
                 player.current.position = { x: CANVAS_WIDTH / 2 - 16, y: CANVAS_HEIGHT - 120 };
                 player.current.velocity = { x: 0, y: 0 };
                 cameraY.current = 0;
@@ -84,167 +198,234 @@
                 highestY.current = CANVAS_HEIGHT;
                 maxAltitudeReached.current = 0;
                 gravityMultiplier.current = 1;
-                platforms.current = [{
-                    position: { x: 0, y: CANVAS_HEIGHT - 40 },
-                    size: { width: CANVAS_WIDTH, height: 40 },
-                    color: '#FFFFFF',
-                    isGround: true
-                }];
-                for(let i=0; i<10; i++) spawnPlatform();
+                particles.current = [];
+                platforms.current = [{ position: { x: 0, y: CANVAS_HEIGHT - 40 }, size: { width: CANVAS_WIDTH, height: 40 }, color: '#FFFFFF', isGround: true }];
+                for(let i=0; i<15; i++) spawnPlatform();
                 setAltitude(0);
+                setScreen('GAME');
             };
+
+            const startSurvivalEvent = () => {
+                if (isEventActive || screen !== 'GAME') return;
+                snapshotRef.current = { platforms: [...platforms.current], playerPos: {...player.current.position}, cameraY: cameraY.current, targetCameraY: targetCameraY.current, highestY: highestY.current, altitude: maxAltitudeReached.current };
+                platforms.current = [{ position: { x: 0, y: CANVAS_HEIGHT - 40 }, size: { width: CANVAS_WIDTH, height: 40 }, color: '#333', isGround: true }];
+                player.current.position = { x: CANVAS_WIDTH / 2 - 16, y: CANVAS_HEIGHT - 120 };
+                cameraY.current = 0; targetCameraY.current = 0; bombsRef.current = [];
+                audioAlarm.current?.play().catch(() => {});
+                setIsEventActive(true);
+                setEventTimeLeft(30);
+            };
+
+            const endSurvivalEvent = (success) => {
+                setIsEventActive(false);
+                bombsRef.current = [];
+                if (success) {
+                    setFlashMessage("SURVÉCU !");
+                    setTimeout(() => {
+                        setFlashMessage(null);
+                        if (snapshotRef.current) {
+                            const s = snapshotRef.current;
+                            platforms.current = s.platforms;
+                            player.current.position = s.playerPos;
+                            cameraY.current = s.cameraY;
+                            targetCameraY.current = s.targetCameraY;
+                            highestY.current = s.highestY;
+                            maxAltitudeReached.current = s.altitude;
+                            setAltitude(s.altitude);
+                            snapshotRef.current = null;
+                        }
+                    }, 1500);
+                }
+            };
+
+            const setupTwitch = useCallback((channel) => {
+                const tmi = window.tmi;
+                if (!tmi || !channel) return;
+                const client = new tmi.Client({ channels: [channel] });
+                client.connect().catch(console.error);
+                client.on('message', (_, tags, msg, self) => {
+                    if (self) return;
+                    const now = Date.now();
+                    if (now - lastCommandTime.current < COMMAND_COOLDOWN) return;
+                    const cmd = msg.toLowerCase().trim();
+                    if (cmd === '!boom') { startSurvivalEvent(); lastCommandTime.current = now; }
+                    else if (cmd === '!poids') { gravityMultiplier.current = 3; lastCommandTime.current = now; setTimeout(() => gravityMultiplier.current = 1, 5000); }
+                });
+                return () => client.disconnect();
+            }, [screen, isEventActive]);
 
             useEffect(() => {
                 const canvas = canvasRef.current;
                 const ctx = canvas.getContext('2d');
-                resetGame();
+                let cleanupTwitch;
+                if (streamerMode && twitchChannel && screen === 'GAME') cleanupTwitch = setupTwitch(twitchChannel);
 
-                let client;
-                if (streamerMode && twitchChannel && window.tmi) {
-                    client = new window.tmi.Client({ channels: [twitchChannel] });
-                    client.connect().then(() => setTwitchConnected(true)).catch(console.error);
-                    client.on('message', (chan, tags, msg) => {
-                        const now = Date.now();
-                        if (now - lastCommandTime.current < COMMAND_COOLDOWN) return;
-                        const cmd = msg.toLowerCase().trim();
-                        if (cmd === '!boom') { player.current.velocity.y = -22; lastCommandTime.current = now; }
-                        else if (cmd === '!poids') { 
-                            gravityMultiplier.current = 3; lastCommandTime.current = now;
-                            setTimeout(() => gravityMultiplier.current = 1, 5000);
-                        }
-                    });
-                }
-
-                const handleKey = (e) => { keys.current[e.code] = e.type === 'keydown'; };
-                window.addEventListener('keydown', handleKey);
-                window.addEventListener('keyup', handleKey);
+                const handleKeyDown = (e) => { keys.current[e.code] = true; };
+                const handleKeyUp = (e) => { keys.current[e.code] = false; };
+                window.addEventListener('keydown', handleKeyDown);
+                window.addEventListener('keyup', handleKeyUp);
 
                 let animId;
-                const loop = () => {
-                    const p = player.current;
-                    if (keys.current['ArrowLeft']) p.velocity.x -= SPEED;
-                    if (keys.current['ArrowRight']) p.velocity.x += SPEED;
-                    p.velocity.y += (GRAVITY_BASE * gravityMultiplier.current);
-                    p.velocity.x *= FRICTION;
-                    p.position.x += p.velocity.x;
-                    p.position.y += p.velocity.y;
+                let frameCount = 0;
 
-                    if (p.position.x + p.size.width < 0) p.position.x = CANVAS_WIDTH;
-                    if (p.position.x > CANVAS_WIDTH) p.position.x = -p.size.width;
+                const gameLoop = () => {
+                    frameCount++;
+                    if (screen === 'GAME') {
+                        const p = player.current;
+                        if (keys.current['ArrowLeft']) p.velocity.x -= SPEED;
+                        if (keys.current['ArrowRight']) p.velocity.x += SPEED;
+                        p.velocity.y += (GRAVITY_BASE * gravityMultiplier.current);
+                        p.velocity.x *= FRICTION;
+                        p.position.x += p.velocity.x;
+                        p.position.y += p.velocity.y;
 
-                    p.onGround = false;
-                    platforms.current.forEach(plat => {
-                        if (p.velocity.y > 0 && 
-                            p.position.x < plat.position.x + plat.size.width &&
-                            p.position.x + p.size.width > plat.position.x &&
-                            p.position.y + p.size.height >= plat.position.y &&
-                            p.position.y + p.size.height - p.velocity.y <= plat.position.y + 12) {
-                            p.position.y = plat.position.y - p.size.height;
-                            p.velocity.y = 0;
-                            p.onGround = true;
+                        if (p.position.x + 32 < 0) p.position.x = CANVAS_WIDTH;
+                        if (p.position.x > CANVAS_WIDTH) p.position.x = -32;
+
+                        p.onGround = false;
+                        platforms.current.forEach(plat => {
+                            if (plat.isHazard && p.position.x < plat.position.x + plat.size.width && p.position.x + 32 > plat.position.x && p.position.y + 32 > plat.position.y - 8 && p.position.y < plat.position.y + 5) {
+                                triggerExplosion(p.position.x + 16, p.position.y + 16);
+                                audioDeath.current?.play();
+                                setScreen('GAMEOVER');
+                            }
+                            if (p.velocity.y > 0 && p.position.x < plat.position.x + plat.size.width && p.position.x + 32 > plat.position.x && p.position.y + 32 >= plat.position.y && p.position.y + 32 - p.velocity.y <= plat.position.y + 12) {
+                                p.position.y = plat.position.y - 32; p.velocity.y = 0; p.onGround = true;
+                            }
+                        });
+
+                        if (keys.current['Space'] && p.onGround) { p.velocity.y = JUMP_FORCE; audioJump.current?.play(); }
+
+                        if (!isEventActive) {
+                            targetCameraY.current = Math.min(targetCameraY.current, p.position.y - CANVAS_HEIGHT/2);
+                            cameraY.current += (targetCameraY.current - cameraY.current) * 0.1;
+                            const currentMeters = Math.floor((CANVAS_HEIGHT - 120 - p.position.y) / PIXELS_PER_METER);
+                            if (currentMeters > maxAltitudeReached.current) { maxAltitudeReached.current = currentMeters; setAltitude(currentMeters); }
+                            if (highestY.current > cameraY.current - CANVAS_HEIGHT) spawnPlatform();
+                            if (p.position.y > cameraY.current + CANVAS_HEIGHT + 100) { audioDeath.current?.play(); setScreen('GAMEOVER'); }
+                        } else {
+                            if (frameCount % 60 === 0) setEventTimeLeft(prev => { if (prev <= 1) { endSurvivalEvent(true); return 0; } return prev - 1; });
+                            if (frameCount % 20 === 0) bombsRef.current.push({ x: Math.random() * CANVAS_WIDTH, y: -50, vy: 2 + Math.random() * 5, radius: 15 });
+                            bombsRef.current = bombsRef.current.filter(bomb => {
+                                bomb.y += bomb.vy;
+                                const dx = bomb.x - (p.position.x + 16), dy = bomb.y - (p.position.y + 16);
+                                if (Math.sqrt(dx*dx + dy*dy) < bomb.radius + 14) { audioDeath.current?.play(); setScreen('GAMEOVER'); return false; }
+                                return bomb.y < CANVAS_HEIGHT + 100;
+                            });
                         }
-                    });
-
-                    if (keys.current['Space'] && p.onGround) p.velocity.y = JUMP_FORCE;
-
-                    targetCameraY.current = Math.min(targetCameraY.current, p.position.y - CANVAS_HEIGHT/2);
-                    cameraY.current += (targetCameraY.current - cameraY.current) * 0.1;
-
-                    const currentMeters = Math.floor((CANVAS_HEIGHT - 120 - p.position.y) / PIXELS_PER_METER);
-                    if (currentMeters > maxAltitudeReached.current) {
-                        maxAltitudeReached.current = currentMeters;
-                        setAltitude(currentMeters);
                     }
 
-                    if (highestY.current > cameraY.current - CANVAS_HEIGHT) spawnPlatform();
-                    if (p.position.y > cameraY.current + CANVAS_HEIGHT + 150) setScreen('MENU');
-
-                    ctx.fillStyle = '#FDFDFD';
-                    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-                    ctx.save();
-                    ctx.translate(0, -cameraY.current);
-
-                    platforms.current.forEach(plat => {
-                        ctx.fillStyle = plat.isGround ? '#EEE' : plat.color;
-                        ctx.beginPath();
-                        ctx.roundRect(plat.position.x, plat.position.y, plat.size.width, plat.size.height, 8);
-                        ctx.fill();
+                    particles.current = particles.current.filter(part => {
+                        part.vy += part.gravity; part.x += part.vx; part.y += part.vy; part.life++;
+                        return part.life < part.maxLife;
                     });
 
-                    ctx.fillStyle = gravityMultiplier.current > 1 ? '#333' : '#FF0080';
-                    ctx.beginPath();
-                    ctx.arc(p.position.x + 16, p.position.y + 16, 16, 0, Math.PI*2);
-                    ctx.fill();
+                    ctx.fillStyle = isEventActive ? '#1a1a1a' : '#FDFDFD';
+                    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+                    ctx.save();
+                    ctx.translate(0, -cameraY.current);
+                    platforms.current.forEach(plat => {
+                        ctx.fillStyle = plat.color;
+                        ctx.beginPath(); ctx.roundRect(plat.position.x, plat.position.y, plat.size.width, plat.size.height, 10); ctx.fill();
+                        if (plat.isHazard) {
+                            ctx.fillStyle = '#FF3030';
+                            for(let i=0; i<plat.size.width/15; i++) {
+                                ctx.beginPath(); ctx.moveTo(plat.position.x + i*15, plat.position.y); ctx.lineTo(plat.position.x + i*15 + 7.5, plat.position.y - 10); ctx.lineTo(plat.position.x + i*15 + 15, plat.position.y); ctx.fill();
+                            }
+                        }
+                    });
+                    if (isEventActive) bombsRef.current.forEach(bomb => { ctx.beginPath(); ctx.arc(bomb.x, bomb.y, bomb.radius, 0, Math.PI*2); ctx.fillStyle = '#FF3030'; ctx.fill(); });
+                    particles.current.forEach(part => { ctx.globalAlpha = 1 - (part.life / part.maxLife); ctx.fillStyle = part.color; ctx.beginPath(); ctx.arc(part.x, part.y, part.size, 0, Math.PI*2); ctx.fill(); ctx.restore(); });
+                    if (screen === 'GAME') {
+                        ctx.fillStyle = '#FF0080';
+                        ctx.beginPath(); ctx.arc(player.current.position.x + 16, player.current.position.y + 16, 16, 0, Math.PI*2); ctx.fill();
+                    }
                     ctx.restore();
 
-                    animId = requestAnimationFrame(loop);
+                    if (isEventActive) {
+                        ctx.font = '900 80px Inter'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+                        ctx.fillText(`${eventTimeLeft}S`, CANVAS_WIDTH/2, CANVAS_HEIGHT/2 + 30);
+                    }
+                    if (flashMessage) {
+                        ctx.font = '900 60px Inter'; ctx.textAlign = 'center'; ctx.fillStyle = '#00FF80';
+                        ctx.fillText(flashMessage, CANVAS_WIDTH/2, CANVAS_HEIGHT/2);
+                    }
+                    animId = requestAnimationFrame(gameLoop);
                 };
-                loop();
-
-                return () => {
-                    window.removeEventListener('keydown', handleKey);
-                    window.removeEventListener('keyup', handleKey);
-                    cancelAnimationFrame(animId);
-                    if(client) client.disconnect();
+                gameLoop();
+                return () => { 
+                    window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp);
+                    cancelAnimationFrame(animId); if (cleanupTwitch) cleanupTwitch();
                 };
-            }, [streamerMode, twitchChannel]);
+            }, [screen, isEventActive, streamerMode, twitchChannel]);
 
             return (
-                <div className="relative bg-white/40 backdrop-blur-2xl rounded-[56px] overflow-hidden shadow-2xl w-[600px] h-[800px]">
-                    <div className="absolute top-8 inset-x-8 z-10 flex justify-between pointer-events-none">
-                        <div className="bg-white/80 px-6 py-2 rounded-full shadow-md font-black text-xl">{altitude}m</div>
-                        {streamerMode && (
-                            <div className={`px-4 py-1 rounded-full text-[10px] font-bold border ${twitchConnected ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
-                                {twitchConnected ? `LIVE: ${twitchChannel}` : 'CONNECTING...'}
+                <div className="relative bg-white/40 backdrop-blur-2xl rounded-[56px] overflow-hidden shadow-2xl border border-white/70 w-[600px] h-[800px]">
+                    <input type="file" ref={fileInputRef} className="hidden" accept="audio/*" onChange={(e) => {
+                        const file = e.target.files[0];
+                        if (file) { audioBg.current.src = URL.createObjectURL(file); setCustomMusicName(file.name); }
+                    }} />
+                    
+                    <button onClick={() => setIsMuted(!isMuted)} className="absolute bottom-8 right-8 z-50 bg-white/50 p-3 rounded-full border shadow-md pointer-events-auto">
+                        {isMuted ? "🔇" : "🔊"}
+                    </button>
+
+                    {screen === 'MENU' && (
+                        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center p-12 text-center animate-in">
+                            <h1 className="text-7xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-[#FF8C00] via-[#FF0080] to-[#9D50BB] mb-12">PULSE CLIMB</h1>
+                            <div className="flex flex-col gap-4 w-full max-w-[320px]">
+                                <button onClick={() => fileInputRef.current.click()} className="h-12 rounded-2xl bg-white/40 border-2 border-dashed text-[10px] font-black uppercase truncate px-4">{customMusicName || "Choisir ma musique"}</button>
+                                <button onClick={() => setStreamerMode(!streamerMode)} className={`h-14 rounded-2xl border-2 font-black text-[10px] ${streamerMode ? 'bg-cyan-500/10 border-cyan-400 text-cyan-500' : 'bg-white/40 text-gray-400'}`}>MODE STREAMER : {streamerMode ? 'ON' : 'OFF'}</button>
+                                {streamerMode && <input type="text" placeholder="CHANNEL TWITCH" value={twitchChannel} onChange={(e) => setTwitchChannel(e.target.value)} className="w-full h-14 bg-white/80 rounded-2xl text-center text-xs font-bold" />}
+                                <button onClick={resetGame} className="h-16 rounded-3xl bg-gradient-to-br from-[#FF8C00] to-[#FF0080] text-white font-black tracking-widest text-sm uppercase">Lancer l'ascension</button>
                             </div>
-                        )}
-                    </div>
-                    <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} />
-                </div>
-            );
-        };
-
-        // --- COMPOSANT PRINCIPAL (App) ---
-        const App = () => {
-            const [screen, setScreen] = useState('MENU');
-            const [streamerMode, setStreamerMode] = useState(false);
-            const [twitchChannel, setTwitchChannel] = useState('');
-
-            return (
-                <div className="fixed inset-0 bg-[#FDFDFD] flex flex-col items-center justify-center p-4 overflow-hidden">
-                    {/* Background décoratif */}
-                    <div className="absolute inset-0 pointer-events-none">
-                        <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-orange-100 rounded-full blur-[120px] opacity-40 animate-pulse" />
-                        <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-blue-100 rounded-full blur-[120px] opacity-40" />
-                    </div>
-
-                    {screen === 'GAME' ? (
-                        <GameCanvas streamerMode={streamerMode} twitchChannel={twitchChannel} setScreen={setScreen} />
-                    ) : (
-                        <div className="z-20 flex flex-col items-center max-w-sm w-full text-center">
-                            <h1 className="text-6xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-orange-500 to-pink-600 mb-12">NEON CLIMB</h1>
-                            
-                            <div className="flex flex-col gap-4 w-full">
-                                <button onClick={() => setStreamerMode(!streamerMode)} className={`h-14 rounded-2xl border-2 font-bold text-[10px] tracking-widest transition-all ${streamerMode ? 'bg-cyan-50 border-cyan-400 text-cyan-600 shadow-lg' : 'bg-white border-gray-100 text-gray-400'}`}>
-                                    MODE STREAMER : {streamerMode ? 'ON' : 'OFF'}
-                                </button>
-
-                                {streamerMode && (
-                                    <input type="text" placeholder="NOM DU CHANNEL TWITCH" value={twitchChannel} onChange={(e)=>setTwitchChannel(e.target.value)} className="h-14 bg-white rounded-2xl border border-gray-200 px-4 text-center text-sm font-bold focus:ring-2 focus:ring-cyan-400 outline-none" />
-                                )}
-
-                                <button onClick={() => (streamerMode && !twitchChannel) ? alert("Twitch channel requis") : setScreen('GAME')} className="h-16 rounded-3xl bg-gradient-to-br from-orange-400 to-pink-500 text-white font-black tracking-widest shadow-xl hover:scale-105 active:scale-95 transition-transform">
-                                    LANCER L'ASCENSION
-                                </button>
-                            </div>
-                            <p className="mt-8 text-[10px] text-gray-300 font-bold tracking-[0.3em]">!BOOM • !POIDS</p>
                         </div>
                     )}
+
+                    {screen === 'GAME' && (
+                        <div className="absolute top-8 inset-x-8 z-10 flex justify-between items-start pointer-events-none">
+                            <div className="bg-white/70 backdrop-blur-lg px-8 py-4 rounded-full shadow-lg border border-white/90 font-black text-lg">{altitude}m</div>
+                            {!isEventActive && <button onClick={() => { audioBg.current?.pause(); setScreen('MENU'); }} className="pointer-events-auto bg-white/50 p-4 rounded-full">✕</button>}
+                        </div>
+                    )}
+
+                    {screen === 'GAMEOVER' && (
+                        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-white/60 backdrop-blur-xl p-12 text-center animate-in">
+                            <h2 className="text-5xl font-black italic mb-4">TERMINÉ</h2>
+                            <p className="text-8xl font-black text-gray-900 mb-8">{altitude}m</p>
+                            <button onClick={resetGame} className="h-16 w-full max-w-[280px] rounded-3xl bg-gray-900 text-white font-black uppercase tracking-widest text-xs">Re-tenter</button>
+                        </div>
+                    )}
+
+                    <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} className={`${screen === 'MENU' ? 'opacity-20 blur-2xl' : 'opacity-100'}`} />
                 </div>
             );
         };
 
-        const root = createRoot(document.getElementById('root'));
+        // --- COMPOSANT APP ---
+        const App = () => {
+            return (
+                <div className="fixed inset-0 bg-[#FDFDFD] flex items-center justify-center p-4 overflow-hidden">
+                    <div className="absolute inset-0 pointer-events-none">
+                        <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-orange-100 rounded-full blur-[140px] opacity-40 animate-pulse" />
+                        <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-blue-100 rounded-full blur-[140px] opacity-40" />
+                        <div className="absolute top-[20%] right-[5%] w-[40%] h-[40%] bg-pink-100 rounded-full blur-[120px] opacity-30 animate-bounce duration-[15s]" />
+                    </div>
+
+                    <div className="w-full max-w-4xl mx-auto flex flex-col items-center relative z-10 scale-90 sm:scale-100">
+                        <main className="w-full flex justify-center drop-shadow-[0_50px_80px_rgba(0,0,0,0.12)]">
+                            <GameCanvas />
+                        </main>
+                        <footer className="mt-6 text-center">
+                            <p className="text-[9px] font-black text-gray-300 tracking-[1em] uppercase">PULSE CLIMB • VIBRANT GLASS EDITION</p>
+                        </footer>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
     </script>
 </body>
